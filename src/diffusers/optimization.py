@@ -1,5 +1,5 @@
 # coding=utf-8
-# Copyright 2022 The HuggingFace Inc. team.
+# Copyright 2023 The HuggingFace Inc. team.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -16,7 +16,7 @@
 
 import math
 from enum import Enum
-from typing import Optional, Union
+from typing import Callable, Optional, Union
 
 from torch.optim import Optimizer
 from torch.optim.lr_scheduler import LambdaLR
@@ -34,6 +34,7 @@ class SchedulerType(Enum):
     POLYNOMIAL = "polynomial"
     CONSTANT = "constant"
     CONSTANT_WITH_WARMUP = "constant_with_warmup"
+    CONSTANT_WITH_RULES = "constant_with_rules"
 
 
 def get_constant_schedule(optimizer: Optimizer, last_epoch: int = -1):
@@ -75,6 +76,49 @@ def get_constant_schedule_with_warmup(optimizer: Optimizer, num_warmup_steps: in
         return 1.0
 
     return LambdaLR(optimizer, lr_lambda, last_epoch=last_epoch)
+
+
+def get_constant_schedule_with_rules(optimizer: Optimizer, rules: str, last_epoch: int = -1):
+    """
+    Create a schedule with a constant learning rate with rule for the learning rate.
+
+    Args:
+        optimizer ([`~torch.optim.Optimizer`]):
+            The optimizer for which to schedule the learning rate.
+        rule (`string`):
+            The rules for the learning rate.
+            ex: rules="1:10,0.1:20,0.01:30,0.005"
+            it means that the learning rate is multiple 1 for the first 10 steps, mutiple 0.1 for the
+            next 20 steps, multiple 0.01 for the next 30 steps and multiple 0.005 for the other steps.
+        last_epoch (`int`, *optional*, defaults to -1):
+            The index of the last epoch when resuming training.
+
+    Return:
+        `torch.optim.lr_scheduler.LambdaLR` with the appropriate schedule.
+    """
+
+    rules_dict = {}
+    rule_list = rules.split(",")
+    for rule_str in rule_list[:-1]:
+        value_str, steps_str = rule_str.split(":")
+        steps = int(steps_str)
+        value = float(value_str)
+        rules_dict[steps] = value
+    last_lr = float(rule_list[-1])
+
+    def create_rules_function():
+        def rule_func(steps: int) -> float:
+            sorted_steps = sorted(rules_dict.keys())
+            for i, sorted_step in enumerate(sorted_steps):
+                if steps < sorted_step:
+                    return rules_dict[sorted_steps[i]]
+            return last_lr
+
+        return rule_func
+
+    rules_f = create_rules_function()
+
+    return LambdaLR(optimizer, rules_f, last_epoch=last_epoch)
 
 
 def get_linear_schedule_with_warmup(optimizer, num_warmup_steps, num_training_steps, last_epoch=-1):
@@ -121,9 +165,9 @@ def get_cosine_schedule_with_warmup(
             The number of steps for the warmup phase.
         num_training_steps (`int`):
             The total number of training steps.
-        num_cycles (`float`, *optional*, defaults to 0.5):
-            The number of waves in the cosine schedule (the defaults is to just decrease from the max value to 0
-            following a half-cosine).
+        num_periods (`float`, *optional*, defaults to 0.5):
+            The number of periods of the cosine function in a schedule (the default is to just decrease from the max
+            value to 0 following a half-cosine).
         last_epoch (`int`, *optional*, defaults to -1):
             The index of the last epoch when resuming training.
 
@@ -232,6 +276,7 @@ TYPE_TO_SCHEDULER_FUNCTION = {
     SchedulerType.POLYNOMIAL: get_polynomial_decay_schedule_with_warmup,
     SchedulerType.CONSTANT: get_constant_schedule,
     SchedulerType.CONSTANT_WITH_WARMUP: get_constant_schedule_with_warmup,
+    SchedulerType.CONSTANT_WITH_RULES: get_constant_schedule_with_rules,
 }
 
 
@@ -240,6 +285,9 @@ def get_scheduler(
     optimizer: Optimizer,
     num_warmup_steps: Optional[int] = None,
     num_training_steps: Optional[int] = None,
+    num_cycles: int = 1,
+    power: float = 1.0,
+    last_epoch: int = -1,
 ):
     """
     Unified API to get any scheduler from its name.
@@ -255,21 +303,47 @@ def get_scheduler(
         num_training_steps (`int``, *optional*):
             The number of training steps to do. This is not required by all schedulers (hence the argument being
             optional), the function will raise an error if it's unset and the scheduler type requires it.
+        num_cycles (`int`, *optional*):
+            The number of hard restarts used in `COSINE_WITH_RESTARTS` scheduler.
+        power (`float`, *optional*, defaults to 1.0):
+            Power factor. See `POLYNOMIAL` scheduler
+        last_epoch (`int`, *optional*, defaults to -1):
+            The index of the last epoch when resuming training.
     """
     name = SchedulerType(name)
     schedule_func = TYPE_TO_SCHEDULER_FUNCTION[name]
     if name == SchedulerType.CONSTANT:
-        return schedule_func(optimizer)
+        return schedule_func(optimizer, last_epoch=last_epoch)
 
     # All other schedulers require `num_warmup_steps`
     if num_warmup_steps is None:
         raise ValueError(f"{name} requires `num_warmup_steps`, please provide that argument.")
 
     if name == SchedulerType.CONSTANT_WITH_WARMUP:
-        return schedule_func(optimizer, num_warmup_steps=num_warmup_steps)
+        return schedule_func(optimizer, num_warmup_steps=num_warmup_steps, last_epoch=last_epoch)
 
     # All other schedulers require `num_training_steps`
     if num_training_steps is None:
         raise ValueError(f"{name} requires `num_training_steps`, please provide that argument.")
 
-    return schedule_func(optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=num_training_steps)
+    if name == SchedulerType.COSINE_WITH_RESTARTS:
+        return schedule_func(
+            optimizer,
+            num_warmup_steps=num_warmup_steps,
+            num_training_steps=num_training_steps,
+            num_cycles=num_cycles,
+            last_epoch=last_epoch,
+        )
+
+    if name == SchedulerType.POLYNOMIAL:
+        return schedule_func(
+            optimizer,
+            num_warmup_steps=num_warmup_steps,
+            num_training_steps=num_training_steps,
+            power=power,
+            last_epoch=last_epoch,
+        )
+
+    return schedule_func(
+        optimizer, num_warmup_steps=num_warmup_steps, num_training_steps=num_training_steps, last_epoch=last_epoch
+    )
