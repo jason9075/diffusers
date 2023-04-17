@@ -283,6 +283,7 @@ TYPE_TO_SCHEDULER_FUNCTION = {
 def get_scheduler(
     name: Union[str, SchedulerType],
     optimizer: Optimizer,
+    rules: Optional[List[Dict[str, Any]]] = None,
     num_warmup_steps: Optional[int] = None,
     num_training_steps: Optional[int] = None,
     num_cycles: int = 1,
@@ -314,6 +315,9 @@ def get_scheduler(
     schedule_func = TYPE_TO_SCHEDULER_FUNCTION[name]
     if name == SchedulerType.CONSTANT:
         return schedule_func(optimizer, last_epoch=last_epoch)
+
+    if name == SchedulerType.CONSTANT_WITH_RULES:
+        return schedule_func(optimizer, rules=rules, last_epoch=last_epoch)
 
     # All other schedulers require `num_warmup_steps`
     if num_warmup_steps is None:
